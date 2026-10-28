@@ -4,7 +4,7 @@
 
 ![Origa shapes](images/shapes.png)
 
-### [⬇ Download Origa](https://github.com/iamkingsleey/Origa/raw/main/origa.zip)
+### [⬇ Download Origa](https://github.com/iamkingsleey/Origa/releases/latest/download/origa.zip)
 
 ---
 
@@ -33,7 +33,7 @@ Sizes are built in for the Dollar, Naira, Euro and Pound, plus A4, square and re
 
 ## Install
 
-1. [Download Origa](https://github.com/iamkingsleey/Origa/raw/main/origa.zip). Keep it zipped.
+1. [Download Origa](https://github.com/iamkingsleey/Origa/releases/latest/download/origa.zip). Keep it zipped.
 2. Drag the file into Blender and click **Install**.
 3. In the 3D view, press **N** and open the **Origa** tab.
 
