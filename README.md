@@ -43,4 +43,4 @@ Turn any plane mesh into paper with **right-click › Convert To › Paper (Orig
 
 ## Made by
 
-[Kingsley Mkpandiok](https://github.com/iamkingsleey), a designer working in brand, product and 3D.
+[Kingsley Mkpandiok](https://github.com/iamkingsleey), Multidisciplinary Designer
