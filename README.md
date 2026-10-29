@@ -29,6 +29,8 @@
 
 Every shape stays editable, so you can keep adjusting until it looks right. The paper bends like real paper; it never stretches.
 
+Shapes are low poly by default, with edges only where the paper bends, so they stay light and easy to work with. Switch **Detail** to Medium or High, or turn up **Smooth**, for silkier curves.
+
 Sizes are built in for the Dollar, Naira, Euro and Pound, plus A4, square and receipt paper.
 
 ## Install

@@ -11,7 +11,7 @@
 bl_info = {
     "name": "Origa",
     "author": "Kingsley Mkpandiok",
-    "version": (0, 4, 0),
+    "version": (0, 5, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Origa  |  Add > Mesh > Paper Sheet",
     "description": "Turn a plane mesh into paper: fold, roll, curl, arch, wave, crumple. Made for money: banknote sizes, flying & rolled cash, Money Rain",
@@ -202,6 +202,39 @@ def _integrate(thetas, ds):
     return cx, cz
 
 
+# Detail levels: max bend per edge loop (degrees), longest flat span (share of
+# length), loops across a cupped/skewed width, crumple grid (along, across).
+DETAIL = {
+    "LOW":    dict(angle=15.0, span=1 / 3, across=4, crumple=(40, 10), anim=24),
+    "MEDIUM": dict(angle=8.0, span=1 / 6, across=8, crumple=(80, 20), anim=48),
+    "HIGH":   dict(angle=4.0, span=1 / 12, across=12, crumple=(160, 40), anim=96),
+}
+
+
+def _is_animated(obj):
+    p = obj.origa
+    return bool(p.flutter) or _has_origa_keys(obj)
+
+
+def _pick_rows(thetas, ds, L, max_angle, max_len, twist_rate):
+    """Edge loops only where the paper turns: accumulate bend (plus twist)
+    and drop a loop each time it passes max_angle, or after max_len."""
+    last = len(thetas) - 1
+    ks, acc_a, acc_l = [0], 0.0, 0.0
+    for k in range(1, last + 1):
+        acc_a += abs(thetas[k] - thetas[k - 1]) + twist_rate * ds
+        acc_l += ds
+        if acc_a >= max_angle or acc_l >= max_len - 1e-9:
+            ks.append(k)
+            acc_a = acc_l = 0.0
+    if ks[-1] != last:
+        if last - ks[-1] < 3 and len(ks) > 1:
+            ks[-1] = last
+        else:
+            ks.append(last)
+    return ks
+
+
 def build_sheet(obj, frame=None):
     p = obj.origa
     if not p.is_paper or obj.type != "MESH":
@@ -213,8 +246,24 @@ def build_sheet(obj, frame=None):
     else:
         L, W = short_w, long_l
 
-    nx = max(4, p.res_bend)
-    ny = max(1, p.res_cross)
+    uniform = p.detail == "UNIFORM"
+    lvl = DETAIL.get(p.detail, DETAIL["MEDIUM"])
+    animated = _is_animated(obj)
+
+    if uniform:
+        nx = max(4, p.res_bend)
+        ny = max(1, p.res_cross)
+    else:
+        # across the width: a straight line unless something bends it that way
+        ny = 1
+        if abs(p.cross_bend) > 1e-3:
+            ny = max(ny, math.ceil(abs(p.cross_bend) / lvl["angle"]))
+        if p.roll_amount > 0 and (abs(p.roll_skew) > 1e-4 or abs(p.roll_flare) > 1e-4):
+            ny = max(ny, lvl["across"])
+        if p.crumple:
+            ny = max(ny, lvl["crumple"][1])
+        anim_rows = max(lvl["anim"], lvl["crumple"][0] if p.crumple else 0)
+        nx = anim_rows if animated else 300   # 300 = dense sampling, thinned below
 
     phase = math.radians(p.wave_phase)
     if p.flutter and frame is not None:
@@ -226,6 +275,20 @@ def build_sheet(obj, frame=None):
     ds = L / m
     thetas = [_theta(k * ds, L, p, phase) for k in range(m + 1)]
     cx, cz = _integrate(thetas, ds)
+
+    if uniform or animated:
+        # fixed loop count: steady topology for animation and uniform mode
+        ks = [i * sub for i in range(nx + 1)]
+    else:
+        max_len = L * lvl["span"]
+        if p.crumple:
+            max_len = min(max_len, L / lvl["crumple"][0])
+        if p.tear_depth > 0:
+            max_len = min(max_len, L / max(p.tear_detail * 5.0, 4.0))
+        if p.wave_amount:
+            max_len = min(max_len, L / max(p.wave_count * 8.0, 4.0))
+        twist_rate = abs(math.radians(p.twist)) / L
+        ks = _pick_rows(thetas, ds, L, math.radians(lvl["angle"]), max_len, twist_rate)
 
     # ---- anchor: keep one point fixed & flat so the sheet doesn't swing ----
     ak = {"START": 0, "CENTER": m // 2, "END": m, "GROUND": 0}[p.anchor]
@@ -243,8 +306,8 @@ def build_sheet(obj, frame=None):
             th_j = [_theta(k * ds, L, p, phase, max(f, 0.1)) for k in range(m + 1)]
             jx, jz = _integrate(th_j, ds)
             jox, joz = jx[ak], jz[ak]
-            row_delta.append([((jx[i * sub] - jox) - (cx[i * sub] - ox),
-                               (jz[i * sub] - joz) - (cz[i * sub] - oz)) for i in range(nx + 1)])
+            row_delta.append([((jx[k] - jox) - (cx[k] - ox),
+                               (jz[k] - joz) - (cz[k] - oz)) for k in ks])
 
     twist = math.radians(p.twist)
     cross = math.radians(p.cross_bend)
@@ -252,8 +315,7 @@ def build_sheet(obj, frame=None):
     seed_v = Vector((p.seed * 17.31, p.seed * 5.77, p.seed * 3.13))
 
     verts, uvs_per_vert = [], []
-    for i in range(nx + 1):
-        k = i * sub
+    for i, k in enumerate(ks):
         s = k * ds
         # centre point & frame (rotated to anchor)
         x0, z0 = cx[k] - ox, cz[k] - oz
@@ -305,7 +367,7 @@ def build_sheet(obj, frame=None):
 
     faces = []
     r = ny + 1
-    for i in range(nx):
+    for i in range(len(ks) - 1):
         for j in range(ny):
             a = i * r + j
             faces.append((a, a + r, a + r + 1, a + 1))
@@ -330,6 +392,30 @@ def build_sheet(obj, frame=None):
     me.update()
 
     _sync_thickness(obj)
+    _sync_smooth(obj)
+
+
+def _sync_smooth(obj):
+    p = obj.origa
+    mod = obj.modifiers.get("Origa Smooth")
+    if p.smooth_levels > 0:
+        if mod is None:
+            mod = obj.modifiers.new("Origa Smooth", "SUBSURF")
+            # smooth first, then give it thickness
+            idx = list(obj.modifiers).index(mod)
+            if idx > 0:
+                try:
+                    obj.modifiers.move(idx, 0)
+                except Exception:
+                    try:
+                        with bpy.context.temp_override(object=obj):
+                            bpy.ops.object.modifier_move_to_index(modifier=mod.name, index=0)
+                    except Exception:
+                        pass
+        mod.levels = p.smooth_levels
+        mod.render_levels = p.smooth_levels
+    elif mod is not None:
+        obj.modifiers.remove(mod)
 
 
 def _sync_thickness(obj):
@@ -381,6 +467,16 @@ class OrigaProps(bpy.types.PropertyGroup):
     uv_flip: BoolProperty(name="Flip Texture", default=False, update=_upd,
                           description="Run the image the other way along the sheet")
     uv_mirror: BoolProperty(name="Mirror Texture", default=False, update=_upd)
+    detail: EnumProperty(
+        name="Detail",
+        items=[("LOW", "Low Poly", "Fewest faces: edge loops only where the paper bends"),
+               ("MEDIUM", "Medium", "Smoother curves, still light"),
+               ("HIGH", "High", "Very smooth curves"),
+               ("UNIFORM", "Uniform Grid", "Even grid using the resolution values below")],
+        default="LOW", update=_upd)
+    smooth_levels: IntProperty(
+        name="Smooth", default=0, min=0, max=3, update=_upd,
+        description="Adds a Subdivision Surface modifier: low-poly mesh to edit, smooth result")
     res_bend: IntProperty(name="Resolution", default=120, min=4, max=1000, update=_upd)
     res_cross: IntProperty(name="Cross Resolution", default=24, min=1, max=400, update=_upd)
     bend_axis: EnumProperty(name="Bend Across",
@@ -810,8 +906,14 @@ class ORIGA_PT_panel(bpy.types.Panel):
         r.prop(p, "bend_axis", expand=True)
         b.prop(p, "anchor")
         r = b.row(align=True)
-        r.prop(p, "res_bend")
-        r.prop(p, "res_cross", text="Cross")
+        r.prop(p, "detail", text="")
+        r.prop(p, "smooth_levels")
+        if p.detail == "UNIFORM":
+            r = b.row(align=True)
+            r.prop(p, "res_bend")
+            r.prop(p, "res_cross", text="Cross")
+        b.label(text=f"{len(obj.data.vertices):,} vertices · {len(obj.data.polygons):,} faces",
+                icon="MESH_DATA")
         b.operator("origa.load_texture", icon="IMAGE_DATA")
         r = b.row(align=True)
         r.prop(p, "uv_flip", toggle=True)
