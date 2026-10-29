@@ -11,7 +11,7 @@
 bl_info = {
     "name": "Origa",
     "author": "Kingsley Mkpandiok",
-    "version": (0, 5, 0),
+    "version": (0, 5, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Origa  |  Add > Mesh > Paper Sheet",
     "description": "Turn a plane mesh into paper: fold, roll, curl, arch, wave, crumple. Made for money: banknote sizes, flying & rolled cash, Money Rain",
@@ -262,6 +262,7 @@ def build_sheet(obj, frame=None):
             ny = max(ny, lvl["across"])
         if p.crumple:
             ny = max(ny, lvl["crumple"][1])
+        ny = max(ny, p.cross_loops)
         anim_rows = max(lvl["anim"], lvl["crumple"][0] if p.crumple else 0)
         nx = anim_rows if animated else 300   # 300 = dense sampling, thinned below
 
@@ -477,6 +478,9 @@ class OrigaProps(bpy.types.PropertyGroup):
     smooth_levels: IntProperty(
         name="Smooth", default=0, min=0, max=3, update=_upd,
         description="Adds a Subdivision Surface modifier: low-poly mesh to edit, smooth result")
+    cross_loops: IntProperty(
+        name="Cross Loops", default=1, min=1, max=200, update=_upd,
+        description="Minimum number of segments across the sheet, so there are vertices to grab along the whole length of a roll or fold")
     res_bend: IntProperty(name="Resolution", default=120, min=4, max=1000, update=_upd)
     res_cross: IntProperty(name="Cross Resolution", default=24, min=1, max=400, update=_upd)
     bend_axis: EnumProperty(name="Bend Across",
@@ -912,6 +916,8 @@ class ORIGA_PT_panel(bpy.types.Panel):
             r = b.row(align=True)
             r.prop(p, "res_bend")
             r.prop(p, "res_cross", text="Cross")
+        else:
+            b.prop(p, "cross_loops")
         b.label(text=f"{len(obj.data.vertices):,} vertices · {len(obj.data.polygons):,} faces",
                 icon="MESH_DATA")
         b.operator("origa.load_texture", icon="IMAGE_DATA")
