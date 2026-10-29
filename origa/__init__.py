@@ -11,7 +11,7 @@
 bl_info = {
     "name": "Origa",
     "author": "Kingsley Mkpandiok",
-    "version": (0, 5, 1),
+    "version": (0, 5, 2),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Origa  |  Add > Mesh > Paper Sheet",
     "description": "Turn a plane mesh into paper: fold, roll, curl, arch, wave, crumple. Made for money: banknote sizes, flying & rolled cash, Money Rain",
@@ -392,6 +392,7 @@ def build_sheet(obj, frame=None):
     me.polygons.foreach_set("use_smooth", [True] * len(me.polygons))
     me.update()
 
+    p["bend_len"] = L
     _sync_thickness(obj)
     _sync_smooth(obj)
 
@@ -445,8 +446,44 @@ def _upd(self, context):
     build_sheet(obj, context.scene.frame_current if context else None)
 
 
+def _bend_len(p):
+    return p.length if p.bend_axis == "LENGTH" else p.width
+
+
+def _keep_shape(p):
+    """Resizing the sheet scales the roll with it, so a roll stays rolled
+    (same number of turns) instead of unrolling as the paper gets shorter."""
+    old, new = p.bend_len, _bend_len(p)
+    if p.keep_shape and old > 0 and abs(new - old) > 1e-9:
+        p["roll_radius"] = max(p.roll_radius * new / old, 0.0005)
+
+
 def _upd_size(self, context):
+    if _SUSPEND:
+        return
     _apply_size(self)
+    _keep_shape(self)
+    _upd(self, context)
+
+
+def _upd_length(self, context):
+    if _SUSPEND:
+        return
+    _apply_size(self)
+    _keep_shape(self)
+    _upd(self, context)
+
+
+def _upd_width(self, context):
+    global _SUSPEND
+    if _SUSPEND:
+        return
+    if self.size_preset != "CUSTOM":
+        # typing a width means the sheet is no longer a standard size
+        _SUSPEND = True
+        self.size_preset = "CUSTOM"
+        _SUSPEND = False
+    _keep_shape(self)
     _upd(self, context)
 
 
@@ -461,8 +498,12 @@ class OrigaProps(bpy.types.PropertyGroup):
         name="Size",
         items=[(k, v[0], "") for k, v in SIZES.items()] + [("CUSTOM", "Custom", "")],
         default="USD", update=_upd_size)
-    length: FloatProperty(name="Length", default=2.0, min=0.01, soft_max=20, unit="LENGTH", update=_upd)
-    width: FloatProperty(name="Width", default=0.846, min=0.01, soft_max=20, unit="LENGTH", update=_upd)
+    length: FloatProperty(name="Length", default=2.0, min=0.01, soft_max=20, unit="LENGTH", update=_upd_length)
+    width: FloatProperty(name="Width", default=0.846, min=0.01, soft_max=20, unit="LENGTH", update=_upd_width)
+    keep_shape: BoolProperty(
+        name="Keep Shape When Resizing", default=True,
+        description="Rolls scale with the sheet, so changing Length or Width keeps the same shape instead of unrolling")
+    bend_len: FloatProperty(default=0.0, options={"HIDDEN"})
     thickness: FloatProperty(name="Thickness", default=0.006, min=0.0, soft_max=0.1,
                              precision=4, unit="LENGTH", update=_upd)
     uv_flip: BoolProperty(name="Flip Texture", default=False, update=_upd,
@@ -902,9 +943,8 @@ class ORIGA_PT_panel(bpy.types.Panel):
         b.prop(p, "size_preset")
         r = b.row(align=True)
         r.prop(p, "length")
-        sub = r.row(align=True)
-        sub.enabled = p.size_preset == "CUSTOM"
-        sub.prop(p, "width")
+        r.prop(p, "width")
+        b.prop(p, "keep_shape")
         b.prop(p, "thickness")
         r = b.row(align=True)
         r.prop(p, "bend_axis", expand=True)
