@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "origa"
-version = "0.5.2"
+version = "0.5.3"
 name = "Origa"
 tagline = "Shape paper and money: fold, roll, curl, crumple, make it rain"
 maintainer = "Kingsley Mkpandiok <iamkingsleey@gmail.com>"

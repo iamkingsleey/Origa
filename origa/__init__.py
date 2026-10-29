@@ -11,7 +11,7 @@
 bl_info = {
     "name": "Origa",
     "author": "Kingsley Mkpandiok",
-    "version": (0, 5, 2),
+    "version": (0, 5, 3),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Origa  |  Add > Mesh > Paper Sheet",
     "description": "Turn a plane mesh into paper: fold, roll, curl, arch, wave, crumple. Made for money: banknote sizes, flying & rolled cash, Money Rain",
@@ -109,6 +109,13 @@ def _arch_theta(s, L, p):
     return 0.0
 
 
+def _fit_radius(r0, gap, rmin, span):
+    """Grow the roll's outer radius just enough that all the rolled paper fits
+    in a spiral down to the core, so turns never land on top of each other."""
+    b = max(gap, 1e-6) / (2.0 * math.pi)
+    return max(r0, math.sqrt(rmin * rmin + 2.0 * b * span))
+
+
 def _theta(s, L, p, phase, rad_k=1.0):
     """Tangent angle of the paper's centre-line at arc length s."""
     th = 0.0
@@ -164,7 +171,8 @@ def _theta(s, L, p, phase, rad_k=1.0):
     # Roll (scroll / rolled cash)
     if p.roll_amount > 0.0:
         r0 = p.roll_radius * rad_k
-        gap = p.roll_tightness * r0
+        # layers can never sit closer than the paper is thick
+        gap = max(p.roll_tightness * r0, p.thickness * 1.25, L * 0.0015)
         rmin = 0.3 * r0
         span = L * p.roll_amount
         span_end = min(span * (1.0 + p.roll_balance), L)
@@ -173,9 +181,9 @@ def _theta(s, L, p, phase, rad_k=1.0):
             span_end = span_start = min(span, L)
         sign = -1.0 if p.roll_flip else 1.0
         if p.roll_from in ("END", "BOTH"):
-            th += sign * _roll_angle(s - (L - span_end), r0, gap, rmin)
+            th += sign * _roll_angle(s - (L - span_end), _fit_radius(r0, gap, rmin, span_end), gap, rmin)
         if p.roll_from in ("START", "BOTH"):
-            th -= sign * _roll_angle(span_start - s, r0, gap, rmin)
+            th -= sign * _roll_angle(span_start - s, _fit_radius(r0, gap, rmin, span_start), gap, rmin)
 
     return th
 
@@ -559,7 +567,7 @@ class OrigaProps(bpy.types.PropertyGroup):
     # roll
     roll_amount: FloatProperty(name="Roll", default=0.0, min=0.0, max=1.0, subtype="FACTOR", update=_upd)
     roll_radius: FloatProperty(name="Radius", default=0.18, min=0.005, soft_max=2.0, unit="LENGTH", update=_upd)
-    roll_tightness: FloatProperty(name="Layer Gap", default=0.18, min=0.0, max=1.0, update=_upd,
+    roll_tightness: FloatProperty(name="Layer Gap", subtype="FACTOR", default=0.18, min=0.0, max=1.0, update=_upd,
                                   description="How much the roll tightens each turn")
     roll_from: EnumProperty(name="From",
                             items=[("END", "End", ""), ("START", "Start", ""), ("BOTH", "Both (Scroll)", "")],
