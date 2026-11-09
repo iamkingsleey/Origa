@@ -11,7 +11,7 @@
 bl_info = {
     "name": "Origa",
     "author": "Kingsley Mkpandiok",
-    "version": (0, 5, 3),
+    "version": (0, 6, 0),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Origa  |  Add > Mesh > Paper Sheet",
     "description": "Turn a plane mesh into paper: fold, roll, curl, arch, wave, crumple. Made for money: banknote sizes, flying & rolled cash, Money Rain",
@@ -172,7 +172,10 @@ def _theta(s, L, p, phase, rad_k=1.0):
     if p.roll_amount > 0.0:
         r0 = p.roll_radius * rad_k
         # layers can never sit closer than the paper is thick
+        notes = max(1, p.stack_count)
         gap = max(p.roll_tightness * r0, p.thickness * 1.25, L * 0.0015)
+        if notes > 1:
+            gap = max(gap, _stack_gap(p, L) * notes * 1.15)
         rmin = 0.3 * r0
         span = L * p.roll_amount
         span_end = min(span * (1.0 + p.roll_balance), L)
@@ -199,6 +202,144 @@ def _tear(s, L, W, p, side):
     notch = max(0.0, noise.noise(Vector((x * 2.2, o + 2.9, 4.7))) - 0.25) * 3.0
     d = 0.15 + max(0.0, 0.5 + n) + 0.3 * hi + notch
     return max(0.0, d) * p.tear_depth * W
+
+
+def _stack_gap(p, L):
+    """Space between notes in a stack (auto = a little more than the paper)."""
+    if p.stack_gap > 0:
+        return p.stack_gap
+    return max(p.thickness * 1.6, L * 0.002)
+
+
+def _hull2d(pts):
+    pts = sorted(set(pts))
+    if len(pts) < 3:
+        return pts
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    lo, hi = [], []
+    for q in pts:
+        while len(lo) >= 2 and cross(lo[-2], lo[-1], q) <= 0:
+            lo.pop()
+        lo.append(q)
+    for q in reversed(pts):
+        while len(hi) >= 2 and cross(hi[-2], hi[-1], q) <= 0:
+            hi.pop()
+        hi.append(q)
+    return lo[:-1] + hi[:-1]
+
+
+def _round_loop(hull, r, seg=6):
+    """Hull grown outward by r with rounded corners (counter-clockwise)."""
+    n = len(hull)
+    if n < 3:
+        return hull
+    out = []
+    for i in range(n):
+        a, b, c = hull[i - 1], hull[i], hull[(i + 1) % n]
+        e1 = (b[0] - a[0], b[1] - a[1])
+        e2 = (c[0] - b[0], c[1] - b[1])
+        a1 = math.atan2(e1[1], e1[0]) - math.pi / 2
+        a2 = math.atan2(e2[1], e2[0]) - math.pi / 2
+        while a2 < a1:
+            a2 += 2 * math.pi
+        steps = max(1, int(seg * (a2 - a1) / (math.pi / 2)))
+        for t in range(steps + 1):
+            ang = a1 + (a2 - a1) * t / steps
+            out.append((b[0] + r * math.cos(ang), b[1] + r * math.sin(ang)))
+    return out
+
+
+def _band_material():
+    mat = bpy.data.materials.get("Origa Rubber Band")
+    if mat is None:
+        mat = bpy.data.materials.new("Origa Rubber Band")
+        mat.use_nodes = True
+        b = next((n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED"), None)
+        if b:
+            b.inputs["Base Color"].default_value = (0.55, 0.38, 0.18, 1)
+            b.inputs["Roughness"].default_value = 0.45
+        mat.diffuse_color = (0.55, 0.38, 0.18, 1)
+    return mat
+
+
+def _sync_band(obj, layers_xyz, ny, rows, L, W, swap):
+    """Rubber band(s) around the stack: a child object hugging the outline."""
+    p = obj.origa
+    bo = bpy.data.objects.get(p.band_name) if p.band_name else None
+    if not p.band:
+        if bo is not None:
+            me = bo.data
+            bpy.data.objects.remove(bo)
+            if me.users == 0:
+                bpy.data.meshes.remove(me)
+        p["band_name"] = ""
+        return
+    if bo is None or bo.parent is not obj:
+        me = bpy.data.meshes.new(f"{obj.name} Band")
+        bo = bpy.data.objects.new(f"{obj.name} Band", me)
+        for col in obj.users_collection:
+            col.objects.link(bo)
+        bo.parent = obj
+        bo.matrix_parent_inverse.identity()
+        me.materials.append(_band_material())
+        p["band_name"] = bo.name
+
+    bw = p.band_width * W
+    bt = max(p.band_thickness, 1e-4)
+    margin = max(p.thickness, 0.0) * 0.5 + bt * 0.5
+    verts, faces = [], []
+    n = max(1, p.band_count)
+    for b in range(n):
+        if n == 1:
+            frac = p.band_position
+        else:
+            frac = p.band_position + (b - (n - 1) / 2) * p.band_spacing
+        frac = min(max(frac, 0.02), 0.98)
+        fj = frac * ny
+        j0 = min(int(fj), ny - 1) if ny > 0 else 0
+        j1 = min(j0 + 1, ny)
+        t = fj - j0
+        pts, ys = [], []
+        for lay in layers_xyz:
+            for i in range(rows):
+                a = lay[i * (ny + 1) + j0]
+                c = lay[i * (ny + 1) + j1]
+                x = a[0] + (c[0] - a[0]) * t
+                y = a[1] + (c[1] - a[1]) * t
+                z = a[2] + (c[2] - a[2]) * t
+                pts.append((round(x, 6), round(z, 6)))
+                ys.append(y)
+        yc = sum(ys) / len(ys)
+        loop = _round_loop(_hull2d(pts), margin)
+        if len(loop) < 3:
+            continue
+        # outward normals of the loop for inner/outer faces
+        m = len(loop)
+        rings = []
+        for (oy, on) in ((-bw / 2, -bt / 2), (bw / 2, -bt / 2), (bw / 2, bt / 2), (-bw / 2, bt / 2)):
+            ring = []
+            for i in range(m):
+                a, c = loop[i - 1], loop[(i + 1) % m]
+                tx, tz = c[0] - a[0], c[1] - a[1]
+                ln = math.hypot(tx, tz) or 1.0
+                nx_, nz_ = tz / ln, -tx / ln   # outward for counter-clockwise loop
+                x = loop[i][0] + nx_ * on
+                z = loop[i][1] + nz_ * on
+                y = yc + oy
+                ring.append(len(verts))
+                verts.append((y, -x, z) if swap else (x, y, z))
+            rings.append(ring)
+        for r in range(4):
+            r0, r1 = rings[r], rings[(r + 1) % 4]
+            for i in range(m):
+                i2 = (i + 1) % m
+                faces.append((r0[i], r0[i2], r1[i2], r1[i]))
+    me = bo.data
+    me.clear_geometry()
+    me.from_pydata(verts, [], faces)
+    me.polygons.foreach_set("use_smooth", [True] * len(me.polygons))
+    me.update()
 
 
 def _integrate(thetas, ds):
@@ -323,7 +464,7 @@ def build_sheet(obj, frame=None):
     kc = cross / W if abs(cross) > 1e-6 else 0.0
     seed_v = Vector((p.seed * 17.31, p.seed * 5.77, p.seed * 3.13))
 
-    verts, uvs_per_vert = [], []
+    verts, uvs_per_vert, norms = [], [], []
     for i, k in enumerate(ks):
         s = k * ds
         # centre point & frame (rotated to anchor)
@@ -367,19 +508,47 @@ def build_sheet(obj, frame=None):
                     d = (1.0 - p.crumple_sharp) * d + p.crumple_sharp * (0.6 - abs(d) * 1.6)
                 P += Nt * d * p.crumple * W * 0.08
 
+            verts.append((P.x, P.y, P.z))
+            norms.append((Nt.x, Nt.y, Nt.z))
             if p.bend_axis == "LENGTH":
-                verts.append((P.x, P.y, P.z))
                 uvs_per_vert.append((s / L, (v + W / 2.0) / W))
-            else:  # rotate so the long side still runs along X
-                verts.append((P.y, -P.x, P.z))
+            else:
                 uvs_per_vert.append(((v + W / 2.0) / W, 1.0 - s / L))
 
-    faces = []
+    # ---- stack: extra notes nested outside the first, so folds stay folded ----
+    swap = p.bend_axis != "LENGTH"
+    notes = max(1, p.stack_count)
+    pos_turn = sum(max(thetas[q + 1] - thetas[q], 0.0) for q in range(m))
+    neg_turn = sum(max(thetas[q] - thetas[q + 1], 0.0) for q in range(m))
+    outward = -1.0 if pos_turn >= neg_turn else 1.0
+    if p.stack_flip:
+        outward = -outward
+    gapd = _stack_gap(p, L)
+    rng = random.Random(p.seed * 7919 + 11)
+    layers = []
+    for n_i in range(notes):
+        off = outward * gapd * n_i
+        slide = (rng.uniform(-1, 1) * p.stack_jitter * W * 0.04) if n_i else 0.0
+        lay = []
+        for (x, y, z), (nx_, ny_, nz_) in zip(verts, norms):
+            lay.append((x + nx_ * off, y + ny_ * off + slide, z + nz_ * off))
+        layers.append(lay)
+
+    rows = len(ks)
     r = ny + 1
-    for i in range(len(ks) - 1):
-        for j in range(ny):
-            a = i * r + j
-            faces.append((a, a + r, a + r + 1, a + 1))
+    per = rows * r
+    all_verts, faces = [], []
+    for n_i, lay in enumerate(layers):
+        base = n_i * per
+        for (x, y, z) in lay:
+            all_verts.append((y, -x, z) if swap else (x, y, z))
+        for i in range(rows - 1):
+            for j in range(ny):
+                a = base + i * r + j
+                faces.append((a, a + r, a + r + 1, a + 1))
+    _sync_band(obj, layers, ny, rows, L, W, swap)
+    uvs_per_vert = uvs_per_vert * notes
+    verts = all_verts
 
     me = obj.data
     me.clear_geometry()
@@ -581,6 +750,25 @@ class OrigaProps(bpy.types.PropertyGroup):
     roll_flare: FloatProperty(name="Flare", default=0.0, min=-0.9, max=1.5, update=_upd,
                               description="Rolls swell at their ends (+) or bulge in the middle (-)")
 
+    # stack of notes + rubber band
+    stack_count: IntProperty(name="Notes", default=1, min=1, max=60, update=_upd,
+                             description="How many notes are stacked together, each nested outside the last")
+    stack_gap: FloatProperty(name="Spacing", default=0.0, min=0.0, soft_max=0.05, precision=4,
+                             unit="LENGTH", update=_upd,
+                             description="Space between notes (0 = automatic, just over the paper thickness)")
+    stack_jitter: FloatProperty(name="Messy", default=0.3, min=0.0, max=1.0, subtype="FACTOR",
+                                update=_upd, description="Slightly offset each note so the stack looks hand-made")
+    stack_flip: BoolProperty(name="Stack Inward", default=False, update=_upd,
+                             description="Grow the stack on the other side of the paper")
+    band: BoolProperty(name="Rubber Band", default=False, update=_upd)
+    band_count: IntProperty(name="Bands", default=1, min=1, max=4, update=_upd)
+    band_position: FloatProperty(name="Position", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_upd)
+    band_spacing: FloatProperty(name="Band Spacing", default=0.18, min=0.02, max=0.5, update=_upd)
+    band_width: FloatProperty(name="Band Width", default=0.04, min=0.005, max=0.3, update=_upd)
+    band_thickness: FloatProperty(name="Band Thickness", default=0.01, min=0.0005, soft_max=0.05,
+                                  precision=4, unit="LENGTH", update=_upd)
+    band_name: StringProperty(default="", options={"HIDDEN"})
+
     # torn edges
     tear_depth: FloatProperty(name="Torn Edges", default=0.0, min=0.0, max=0.3, update=_upd,
                               description="How deep the ragged side edges bite in")
@@ -633,7 +821,8 @@ _RESET = dict(wave_amount=0.0, wave_count=1.0, wave_phase=0.0, twist=0.0, cross_
               fold_count=0, fold_angle=150.0, fold_style="ACCORDION", fold_flip=False,
               fold_offset=0.0, crease_softness=0.08, roll_amount=0.0, roll_radius=0.18,
               roll_tightness=0.18, roll_from="END", roll_flip=False, roll_balance=0.0,
-              roll_skew=0.0, roll_flare=0.0, tear_depth=0.0, tear_detail=8.0, edge_curl=0.0,
+              roll_skew=0.0, roll_flare=0.0, stack_count=1, stack_gap=0.0, stack_jitter=0.3,
+              stack_flip=False, band=False, band_count=1, band_position=0.5, tear_depth=0.0, tear_detail=8.0, edge_curl=0.0,
               edge_curl_size=0.2, crumple=0.0, bend_axis="LENGTH", anchor="CENTER",
               curl_start=0.0, curl_start_size=0.1, curl_end=0.0, curl_end_size=0.15,
               lift_angle=0.0, lift_at=0.3, lift_softness=0.08, arch_count=0,
@@ -658,6 +847,11 @@ PRESETS = {
                                            roll_balance=0.08,
                                            tear_depth=0.05, tear_detail=6.0, crumple=0.12,
                                            crumple_scale=4.0, res_bend=200, res_cross=40)),
+    "STACK_FOLD": ("Folded Stack", dict(fold_count=1, fold_angle=178, crease_softness=0.05,
+                                        anchor="START", stack_count=10, band=True)),
+    "STACK_ROLL": ("Rolled Stack", dict(roll_amount=1.0, roll_radius=0.16, roll_tightness=0.2,
+                                        anchor="START", stack_count=6, band=True, band_count=2,
+                                        band_spacing=0.22)),
     "CURLED":    ("Curled Edges", dict(edge_curl=55, edge_curl_size=0.22, cross_bend=10)),
     "CRUMPLED":  ("Crumpled", dict(crumple=0.9, crumple_scale=3.5, crumple_sharp=0.7, wave_amount=10)),
     "RECEIPT_STAND": ("Receipt: Standing", dict(
@@ -1038,6 +1232,25 @@ class ORIGA_PT_panel(bpy.types.Panel):
             b.prop(p, "arch_start")
         if (p.lift_angle or p.arch_count) and p.anchor != "GROUND":
             b.label(text="Tip: set Anchor to Ground", icon="INFO")
+
+        b = lay.box()
+        b.label(text="Stack & Band", icon="DOCUMENTS")
+        b.prop(p, "stack_count")
+        if p.stack_count > 1:
+            r = b.row(align=True)
+            r.prop(p, "stack_gap")
+            r.prop(p, "stack_jitter")
+            b.prop(p, "stack_flip")
+        b.prop(p, "band")
+        if p.band:
+            r = b.row(align=True)
+            r.prop(p, "band_count")
+            r.prop(p, "band_position")
+            r = b.row(align=True)
+            r.prop(p, "band_width")
+            r.prop(p, "band_thickness")
+            if p.band_count > 1:
+                b.prop(p, "band_spacing")
 
         b = lay.box()
         b.label(text="Torn Edges", icon="MOD_EDGESPLIT")
