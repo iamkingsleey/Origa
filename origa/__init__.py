@@ -11,7 +11,7 @@
 bl_info = {
     "name": "Origa",
     "author": "Kingsley Mkpandiok",
-    "version": (0, 6, 0),
+    "version": (0, 6, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Sidebar > Origa  |  Add > Mesh > Paper Sheet",
     "description": "Turn a plane mesh into paper: fold, roll, curl, arch, wave, crumple. Made for money: banknote sizes, flying & rolled cash, Money Rain",
@@ -263,6 +263,48 @@ def _band_material():
     return mat
 
 
+def _band_across(verts, faces, layers_xyz, ny, rows, frac, p, L, bt, margin, swap):
+    """Band wrapping the short way: slice the stack at one point along its
+    length and hug that outline (works through folds too)."""
+    xs = [v[0] for lay in layers_xyz for v in lay]
+    x0, x1 = min(xs), max(xs)
+    xb = x0 + (x1 - x0) * frac
+    pts = []
+    for lay in layers_xyz:
+        for j in range(ny + 1):
+            for i in range(rows - 1):
+                a = lay[i * (ny + 1) + j]
+                c = lay[(i + 1) * (ny + 1) + j]
+                if (a[0] - xb) * (c[0] - xb) <= 0 and abs(c[0] - a[0]) > 1e-9:
+                    t = (xb - a[0]) / (c[0] - a[0])
+                    pts.append((round(a[1] + (c[1] - a[1]) * t, 6),
+                                round(a[2] + (c[2] - a[2]) * t, 6)))
+    loop = _round_loop(_hull2d(pts), margin)
+    if len(loop) < 3:
+        return
+    bw = p.band_width * L
+    m = len(loop)
+    rings = []
+    for (ox, on) in ((-bw / 2, -bt / 2), (bw / 2, -bt / 2), (bw / 2, bt / 2), (-bw / 2, bt / 2)):
+        ring = []
+        for i in range(m):
+            a, c = loop[i - 1], loop[(i + 1) % m]
+            ty, tz = c[0] - a[0], c[1] - a[1]
+            ln = math.hypot(ty, tz) or 1.0
+            ny_, nz_ = tz / ln, -ty / ln
+            y = loop[i][0] + ny_ * on
+            z = loop[i][1] + nz_ * on
+            x = xb + ox
+            ring.append(len(verts))
+            verts.append((y, -x, z) if swap else (x, y, z))
+        rings.append(ring)
+    for r in range(4):
+        r0, r1 = rings[r], rings[(r + 1) % 4]
+        for i in range(m):
+            i2 = (i + 1) % m
+            faces.append((r0[i], r0[i2], r1[i2], r1[i]))
+
+
 def _sync_band(obj, layers_xyz, ny, rows, L, W, swap):
     """Rubber band(s) around the stack: a child object hugging the outline."""
     p = obj.origa
@@ -296,6 +338,9 @@ def _sync_band(obj, layers_xyz, ny, rows, L, W, swap):
         else:
             frac = p.band_position + (b - (n - 1) / 2) * p.band_spacing
         frac = min(max(frac, 0.02), 0.98)
+        if p.band_direction == "WIDTH":
+            _band_across(verts, faces, layers_xyz, ny, rows, frac, p, L, bt, margin, swap)
+            continue
         fj = frac * ny
         j0 = min(int(fj), ny - 1) if ny > 0 else 0
         j1 = min(j0 + 1, ny)
@@ -762,6 +807,11 @@ class OrigaProps(bpy.types.PropertyGroup):
                              description="Grow the stack on the other side of the paper")
     band: BoolProperty(name="Rubber Band", default=False, update=_upd)
     band_count: IntProperty(name="Bands", default=1, min=1, max=4, update=_upd)
+    band_direction: EnumProperty(
+        name="Direction",
+        items=[("LENGTH", "Lengthwise", "Runs the long way, around the fold or roll"),
+               ("WIDTH", "Widthwise", "Wraps the short way across the stack")],
+        default="LENGTH", update=_upd)
     band_position: FloatProperty(name="Position", default=0.5, min=0.0, max=1.0, subtype="FACTOR", update=_upd)
     band_spacing: FloatProperty(name="Band Spacing", default=0.18, min=0.02, max=0.5, update=_upd)
     band_width: FloatProperty(name="Band Width", default=0.04, min=0.005, max=0.3, update=_upd)
@@ -822,7 +872,7 @@ _RESET = dict(wave_amount=0.0, wave_count=1.0, wave_phase=0.0, twist=0.0, cross_
               fold_offset=0.0, crease_softness=0.08, roll_amount=0.0, roll_radius=0.18,
               roll_tightness=0.18, roll_from="END", roll_flip=False, roll_balance=0.0,
               roll_skew=0.0, roll_flare=0.0, stack_count=1, stack_gap=0.0, stack_jitter=0.3,
-              stack_flip=False, band=False, band_count=1, band_position=0.5, tear_depth=0.0, tear_detail=8.0, edge_curl=0.0,
+              stack_flip=False, band=False, band_count=1, band_position=0.5, band_direction="LENGTH", tear_depth=0.0, tear_detail=8.0, edge_curl=0.0,
               edge_curl_size=0.2, crumple=0.0, bend_axis="LENGTH", anchor="CENTER",
               curl_start=0.0, curl_start_size=0.1, curl_end=0.0, curl_end_size=0.15,
               lift_angle=0.0, lift_at=0.3, lift_softness=0.08, arch_count=0,
@@ -1239,10 +1289,11 @@ class ORIGA_PT_panel(bpy.types.Panel):
         if p.stack_count > 1:
             r = b.row(align=True)
             r.prop(p, "stack_gap")
-            r.prop(p, "stack_jitter")
+            r.prop(p, "stack_jitter", text="Messy (0 = neat)")
             b.prop(p, "stack_flip")
         b.prop(p, "band")
         if p.band:
+            b.row(align=True).prop(p, "band_direction", expand=True)
             r = b.row(align=True)
             r.prop(p, "band_count")
             r.prop(p, "band_position")
